@@ -26,8 +26,13 @@ import org.apache.beam.sdk.options.Description;
 import org.apache.beam.sdk.options.PipelineOptions;
 import org.apache.beam.sdk.options.PipelineOptionsFactory;
 import org.apache.beam.sdk.options.Validation.Required;
+import org.apache.beam.sdk.transforms.Combine;
 import org.apache.beam.sdk.transforms.DoFn;
+import org.apache.beam.sdk.transforms.Mean;
 import org.apache.beam.sdk.transforms.ParDo;
+import org.apache.beam.sdk.transforms.join.CoGbkResult;
+import org.apache.beam.sdk.transforms.join.CoGroupByKey;
+import org.apache.beam.sdk.transforms.join.KeyedPCollectionTuple;
 import org.apache.beam.sdk.transforms.windowing.SlidingWindows;
 import org.apache.beam.sdk.transforms.windowing.Window;
 import org.apache.beam.sdk.values.KV;
@@ -68,15 +73,30 @@ public class PubSubReader {
 	}	
 	
 	@SuppressWarnings("serial")
-	static class FormatMessageAsKV extends DoFn<PubsubMessage, KV<String, String>> {
+	static class FormatMessageAsKV extends DoFn<PubsubMessage, KV<String, Double>> {
 		
 		@ProcessElement
 		public void processElement(ProcessContext c) {
 			
-			String key   = c.element().getAttribute("deviceId");
-			String value = new String( c.element().getPayload() );
+			JSONParser 	jsonParser = new JSONParser();
+			JSONObject 	jsonMessage = null;
+			Number		hum=0;
 			
-			c.output(KV.of(key, value));
+			LOG.info(String.format("Message as received (%s)", c.element().getPayload()));
+
+			try {
+				jsonMessage = (JSONObject) jsonParser.parse( new String( c.element().getPayload() ));
+				hum = (Number)jsonMessage.get("hum");
+			} catch (ParseException e) {
+				// TODO Auto-generated catch block
+				e.printStackTrace();
+			}	
+			
+			String key   = c.element().getAttribute("deviceId");
+
+			LOG.info(String.format("Message-value returned (%f)", hum));
+			
+			c.output(KV.of(key, hum.doubleValue()));
 		}
 		
 	}
@@ -88,7 +108,7 @@ public class PubSubReader {
 		@ProcessElement
 		public void processElement(ProcessContext c) {
 			
-			LOG.info(String.format("Message with key (%s) has content (%f) ...", c.element().getKey(), c.element().getValue()));
+			LOG.info(String.format("Message with key (%s) has content (%s) ...", c.element().getKey(), c.element().toString()));
 			
 			c.output(KV.of(c.element().getKey(), c.element().getValue()));
 		}
@@ -96,43 +116,6 @@ public class PubSubReader {
 	}
     
 	
-	@SuppressWarnings("serial")
-	static class FormatKVAsTableRowFn extends DoFn<KV<String,String>, TableRow> {
-    
-		@ProcessElement
-		public void processElement(ProcessContext c) {
-			JSONParser jsonParser = new JSONParser();
-			JSONObject jsonMessage = null;
-			TableRow row = null;
-			
-			try {
-				
-				// Parse the context as a JSON object:
-				jsonMessage = (JSONObject) jsonParser.parse( new String( c.element().getValue() ) );	
-				Number hum = (Number)jsonMessage.get("hum");
-				Number temp = (Number)jsonMessage.get("temp");
-				String deviceID = c.element().getKey();
-
-				// Make a BigQuery row from the JSON object:
-				row = new TableRow()
-						.set("timestamp", c.timestamp().getMillis()/1000 )
-						.set("deviceID", deviceID)
-						.set("humidity", hum.doubleValue() )
-						.set("temp", temp.doubleValue() );
-				
-				LOG.info(String.format("Message (%s) ...", row.toString()));
-
-			} catch (ParseException e) {
-				LOG.warn(String.format("Exception encountered parsing JSON (%s) ...", e));
-
-			} catch (Exception e) {
-				LOG.warn(String.format("Exception: %s", e));
-			} finally {
-				// Output the row:
-				c.output(row);
-			}
-		}
-	}
 	
 	public static void main(String[] args) {
 		PipelineOptionsFactory.register(PubSubOptions.class);
@@ -140,65 +123,90 @@ public class PubSubReader {
 			  										  .withValidation()
 			  										  .as(PubSubOptions.class);
 		Pipeline p = Pipeline.create(options);
-	  
-		String tableSpec = new StringBuilder()
-		        .append("iot-demo-psteiner-2018:")
-		        .append("iot_data.")
-		        .append("raw_data")
-		        .toString();		
-			
-		PCollection<PubsubMessage> items = p.apply(PubsubIO.readMessagesWithAttributes().fromTopic(options.getPubSubTopic()));
+	  		
+		PCollection<PubsubMessage> items = p.apply("Read from PubSub", PubsubIO.readMessagesWithAttributes().fromTopic(options.getPubSubTopic()));
 		
-		PCollection<KV<String,String>> sliding_windowed_items = items
-				.apply(Window.<PubsubMessage>into(SlidingWindows.of(Duration.standardMinutes(5)).every(Duration.standardSeconds(5))))
-				.apply(ParDo.of(new FormatMessageAsKV()));
+		PCollection<KV<String,Double>> sliding_windowed_items = items
+				.apply("Create 1 Minute Window", Window.<PubsubMessage>into(SlidingWindows.of(Duration.standardMinutes(1)).every(Duration.standardSeconds(5))))
+				.apply("Fomat Message to KV<String, Double>", ParDo.of(new FormatMessageAsKV()));
 		
-		final TupleTag<KV<String, Double>> temperatureTag = new TupleTag<KV<String, Double>>(){};
-		final TupleTag<KV<String, Double>> humidityTag = new TupleTag<KV<String, Double>>(){};
+//		final TupleTag<KV<String, Double>> temperatureTag = new TupleTag<KV<String, Double>>(){};
+//		final TupleTag<KV<String, Double>> humidityTag = new TupleTag<KV<String, Double>>(){};
+//				
+//		PCollectionTuple results =
+//				sliding_windowed_items.apply("Split Humidity & Temperature",ParDo
+//			          .of(new DoFn<KV<String, String>, KV<String, Double>>() {
+//			        	  
+//			        	@ProcessElement
+//						public void processElement(ProcessContext c) {
+//			        		  String key   = c.element().getKey();
+//			        	  
+//			        		  JSONParser jsonParser = new JSONParser();
+//			      			  JSONObject jsonMessage = null;
+//			      			  
+//			      			  Number hum=0;
+//			      			  Number temp=0;
+//			      			  
+//			      			  try {
+//			      				  // Parse the context as a JSON object:
+//			      				  jsonMessage = (JSONObject) jsonParser.parse( new String( c.element().getValue() ) );	
+//			      				  hum = (Number)jsonMessage.get("hum");			      				  
+//			      				  temp = (Number)jsonMessage.get("temp");
+//			      			  } catch (ParseException e) {
+//			      				  LOG.warn(String.format("Exception encountered parsing JSON (%s) ...", e));
+//			      			  } catch (Exception e) {
+//			      				  LOG.warn(String.format("Exception: %s", e));
+//			      			  } finally {
+//			      				  // Output to PCollections:
+//			    				c.output(KV.of(key, temp.doubleValue()));
+//			    				c.output(humidityTag, KV.of(key, hum.doubleValue()));
+//			    			}
+//			        	  } 
+//			          })
+//			          .withOutputTags(temperatureTag,    // Specify the tag for the main output.
+//			                          TupleTagList.of(humidityTag))); // Specify the tags for the two additional outputs as a TupleTagList.
+//			                                      
+//		PCollection<KV<String, Double>> tempPCollection = results.get(temperatureTag)
+//				.apply("Calc. average Temperature", Mean.<String, Double>perKey())
+//				.apply(ParDo.of(new LogKVMessage()));
+//		
+//		
+//		PCollection<KV<String, Double>> humPCollection = results.get(humidityTag)
+//				.apply("Calc. average Humidity", Mean.<String, Double>perKey())
+//				.apply(ParDo.of(new LogKVMessage()));
+//		
+//		
+//		final TupleTag<Double> t1 = new TupleTag<>();
+//		final TupleTag<Double> t2 = new TupleTag<>();
+//		
+//		PCollection<KV<String, CoGbkResult>> coGbkResultCollection =
+//		   KeyedPCollectionTuple.of(t1, tempPCollection)
+//		                        .and(t2, humPCollection)
+//		                        .apply("Recombine", CoGroupByKey.<String>create());
+//		
+//		
+//		
+//		PCollection<KV<String, String>> finalResultCollection =
+//				coGbkResultCollection.apply("Create output message", ParDo.of(
+//			        new DoFn<KV<String, CoGbkResult>, KV<String, String>>() {
+//			          @ProcessElement
+//			          public void processElement(ProcessContext c) {
+//			            KV<String, CoGbkResult> e = c.element();
+//			            String countryCode = e.getKey();
+//			            Double temp = 0.0;
+//			            temp = e.getValue().getOnly(t1);
+//			            for (Double hum : c.element().getValue().getAll(t2)) {
+//			              // Generate a string that combines information from both collection values
+//			             LOG.info(String.format("Combined Message (%s) ...", "Temperature: " + temp + ", Humidity: " + hum));
+//			            	
+//			              c.output(KV.of(countryCode, "Temperature: " + temp
+//			                      + ", Humidity: " + hum));
+//			            }
+//			          }
+//			      }));
+	
 		
-		PCollectionTuple results =
-				sliding_windowed_items.apply(ParDo
-			          .of(new DoFn<KV<String, String>, KV<String, Double>>() {
-			        	  
-			        	@SuppressWarnings("unused")
-			        	@ProcessElement
-						public void processElement(ProcessContext c) {
-			        		  String key   = c.element().getKey();
-			        	  
-			        		  JSONParser jsonParser = new JSONParser();
-			      			  JSONObject jsonMessage = null;
-			      			  
-			      			  Number hum=0;
-			      			  Number temp=0;
-			      			  
-			      			  try {
-			      				  // Parse the context as a JSON object:
-			      				  jsonMessage = (JSONObject) jsonParser.parse( new String( c.element().getValue() ) );	
-			      				  hum = (Number)jsonMessage.get("hum");
-			      				  temp = (Number)jsonMessage.get("temp");
-
-			      			  } catch (ParseException e) {
-			      				  LOG.warn(String.format("Exception encountered parsing JSON (%s) ...", e));
-			      			  } catch (Exception e) {
-			      				  LOG.warn(String.format("Exception: %s", e));
-			      			  } finally {
-			      				  // Output to PCollections:
-			    				c.output(KV.of(key, temp.doubleValue()));
-			    				c.output(humidityTag, KV.of(key, hum.doubleValue()));
-			    			}
-			        	  } 
-			          })
-			          .withOutputTags(temperatureTag,    // Specify the tag for the main output.
-			                          TupleTagList.of(humidityTag))); // Specify the tags for the two additional outputs as a TupleTagList.
-			                                      
-		PCollection tempPCollection = results.get(temperatureTag)
-				.apply(ParDo.of(new LogKVMessage()));
-		
-		PCollection humPCollection = results.get(humidityTag)
-				.apply(ParDo.of(new LogKVMessage()));
-		
-		
-		
+				
 //		 		.apply(ParDo.of(new FormatKVAsTableRowFn()))
 //		 		.apply(BigQueryIO.writeTableRows().to(tableSpec.toString())
 //		          .withWriteDisposition(BigQueryIO.Write.WriteDisposition.WRITE_APPEND)
