@@ -38,7 +38,7 @@ import com.google.api.services.bigquery.model.TableRow;
 public class PubSubReader {
 
 	private static final Logger LOG = LoggerFactory.getLogger(PubSubReader.class);
-	 
+
 
 	public interface PubSubOptions extends PipelineOptions {
 		@Description("Path of the file to read from")
@@ -51,31 +51,31 @@ public class PubSubReader {
 		@Default.String("projects/iot-demo-psteiner-2018/topics/iot-topic")
 		String getPubSubTopic();
 		void setPubSubTopic(String pubsubTopic);
-		
+
 		@Description("Path of the file to write to")
 		@Required
 		String getOutput();
 		void setOutput(String value);
-	}	
-	
-	
+	}
+
+
 	static class ComputeWordLengthFn extends DoFn<String, TableRow> {
 		@ProcessElement
 		public void processElement(ProcessContext c) {
 			// Get the input element from ProcessContext.
 		    TableRow row;
 //		    row.
-		    
+
 		    //= c.element();
 		    // Use ProcessContext.output to emit the output element.
 //		    c.output(row.length());
 		 }
 	}
-	
+
 	// A DoFn that converts a logging-message into a BigQuery table row:
 	@SuppressWarnings("serial")
 	static class FormatAsTableRowFn extends DoFn<String, TableRow> {
-    
+
 		@ProcessElement
 		public void processElement(ProcessContext c) {
 			JSONParser jsonParser = new JSONParser();
@@ -84,9 +84,9 @@ public class PubSubReader {
 
 			try {
 				LOG.info(String.format("Message as read from PubSub (%s) ...", c.element()));
-				
+
 				// Parse the context as a JSON object:
-				jsonMessage = (JSONObject) jsonParser.parse(c.element());	
+				jsonMessage = (JSONObject) jsonParser.parse(c.element());
 				Number hum = (Number)jsonMessage.get("hum");
 				Number temp = (Number)jsonMessage.get("temp");
 
@@ -95,8 +95,8 @@ public class PubSubReader {
 //						.set("timestamp",)
 						.set("timestamp", c.timestamp().getMillis()/1000 )
 						.set("humidity", hum.doubleValue() )
-						.set("temp", temp.doubleValue() );
-				
+						.set("temperature", temp.doubleValue() );
+
 				LOG.info(String.format("Message (%s) ...", row.toString()));
 
 			} catch (ParseException e) {
@@ -110,26 +110,26 @@ public class PubSubReader {
 			}
 		}
 	}
-	
+
 	public static void main(String[] args) {
 		PipelineOptionsFactory.register(PubSubOptions.class);
 		PubSubOptions options = PipelineOptionsFactory.fromArgs(args)
 			  										  .withValidation()
 			  										  .as(PubSubOptions.class);
 		Pipeline p = Pipeline.create(options);
-	  
+
 		String tableSpec = new StringBuilder()
-		        .append("iot-demo-psteiner-2018:")
+		        .append("psteiner-iot-demo-test-10:")
 		        .append("iot_data.")
 		        .append("raw_data")
-		        .toString();	
-		
+		        .toString();
+
 		p.apply(PubsubIO.readStrings().fromTopic(options.getPubSubTopic()))
 		 .apply(ParDo.of(new FormatAsTableRowFn()))
 		 .apply(BigQueryIO.writeTableRows().to(tableSpec.toString())
 		          .withWriteDisposition(BigQueryIO.Write.WriteDisposition.WRITE_APPEND)
-		          .withCreateDisposition(BigQueryIO.Write.CreateDisposition.CREATE_NEVER));   		
-	
+		          .withCreateDisposition(BigQueryIO.Write.CreateDisposition.CREATE_NEVER));
+
 		p.run();
 	}
 }
